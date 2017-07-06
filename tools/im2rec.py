@@ -11,6 +11,8 @@ import argparse
 import cv2
 import time
 import traceback
+from PIL import Image
+import numpy as np
 
 try:
     import multiprocessing
@@ -94,8 +96,39 @@ def read_list(path_in):
                 continue
             yield item
 
+
+def transform_image(args, fullpath):
+    try:
+        img = Image.open(fullpath)
+    except:
+        traceback.print_exc()
+        print('imread error trying to load file: %s ' % fullpath)
+        return None
+    if img is None:
+        print('imread read blank (None) image for file: %s' % fullpath)
+        return None
+    if args.center_crop:
+        if img.size[0] > img.size[1]:
+            margin, remainder = divmod(img.size[0] - img.size[1], 2)
+            img = img.crop((margin, 0, img.size[0] - margin - remainder, img.size[1]))
+        else:
+            margin, remainder = divmod(img.size[1] - img.size[0], 2)
+            img = img.crop((0, margin, img.size[0], img.size[1] - margin - remainder))
+    if args.resize:
+        if img.size[0] > img.size[1]:
+            newsize = (args.resize, img.size[0] * args.resize / img.size[1])
+        else:
+            newsize = (img.size[1] * args.resize / img.size[0], args.resize)
+        img = img.resize(newsize)
+    return img
+
+
 def image_encode(args, i, item, q_out):
     fullpath = os.path.join(args.root, item[1])
+    img = transform_image(args, fullpath)
+    if not img:
+        q_out.put((i, None, item))
+        return
 
     if len(item) > 3 and args.pack_label:
         header = mx.recordio.IRHeader(0, item[2:], item[0], 0)
@@ -115,38 +148,15 @@ def image_encode(args, i, item, q_out):
         return
 
     try:
-        img = cv2.imread(fullpath, args.color)
-    except:
-        traceback.print_exc()
-        print('imread error trying to load file: %s ' % fullpath)
-        q_out.put((i, None, item))
-        return
-    if img is None:
-        print('imread read blank (None) image for file: %s' % fullpath)
-        q_out.put((i, None, item))
-        return
-    if args.center_crop:
-        if img.shape[0] > img.shape[1]:
-            margin = (img.shape[0] - img.shape[1]) / 2;
-            img = img[margin:margin + img.shape[1], :]
-        else:
-            margin = (img.shape[1] - img.shape[0]) / 2;
-            img = img[:, margin:margin + img.shape[0]]
-    if args.resize:
-        if img.shape[0] > img.shape[1]:
-            newsize = (args.resize, img.shape[0] * args.resize / img.shape[1])
-        else:
-            newsize = (img.shape[1] * args.resize / img.shape[0], args.resize)
-        img = cv2.resize(img, newsize)
-
-    try:
-        s = mx.recordio.pack_img(header, img, quality=args.quality, img_fmt=args.encoding)
+        s = mx.recordio.pack_img(header, cv2.cvtColor(np.array(img.convert('RGB')), cv2.COLOR_RGB2BGR),
+                                 quality=args.quality, img_fmt=args.encoding)
         q_out.put((i, s, item))
     except Exception, e:
         traceback.print_exc()
         print('pack_img error on file: %s' % fullpath, e)
         q_out.put((i, None, item))
         return
+
 
 def read_worker(args, q_in, q_out):
     while True:
@@ -155,6 +165,7 @@ def read_worker(args, q_in, q_out):
             break
         i, item = deq
         image_encode(args, i, item, q_out)
+
 
 def write_worker(q_out, fname, working_dir):
     pre_time = time.time()
